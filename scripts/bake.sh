@@ -29,14 +29,9 @@ set -euo pipefail
 K8S_VERSION=""
 ROLE="combined"
 CNI="cilium"
-CCM_REGISTRY="${CCM_REGISTRY:-ghcr.io/hypervisor-io}"   # override via env
-CCM_VERSION="latest"
-
-# Hypervisor-flavored cluster-autoscaler image (built via cluster-autoscaler repo).
-# Image tag tracks upstream CA tag, which tracks K8s minor (1.34.x → 1.34.3, 1.35.x → 1.35.0, ...)
-AUTOSCALER_REGISTRY="${AUTOSCALER_REGISTRY:-ghcr.io/hypervisor-io}"
-AUTOSCALER_IMAGE_NAME="${AUTOSCALER_IMAGE_NAME:-cluster-autoscaler}"
-AUTOSCALER_VERSION="${AUTOSCALER_VERSION:-}"   # auto-derived below if empty
+CCM_REGISTRY="${CCM_REGISTRY:-ghcr.io/hypervisor-io}"        # override via env
+CCM_IMAGE_NAME="${CCM_IMAGE_NAME:-cloud-controller-manager}" # override via env (for forks)
+CCM_VERSION="${CCM_VERSION:-latest}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -72,23 +67,10 @@ FLANNEL_VERSION="v0.26.1"
 # Add-ons
 METRICS_SERVER_VERSION="v0.7.2"
 
-# Default autoscaler image tag per K8s minor — bump as upstream CA releases new minors
-# and you build matching cluster-autoscaler images.
-declare -A AUTOSCALER_FOR
-AUTOSCALER_FOR[1.30]="1.30.3"
-AUTOSCALER_FOR[1.31]="1.31.0"
-AUTOSCALER_FOR[1.34]="1.34.3"
-AUTOSCALER_FOR[1.35]="1.35.0"
-
 ETCD_VERSION="${ETCD_FOR[$K8S_MINOR]:-}"
 COREDNS_VERSION="${COREDNS_FOR[$K8S_MINOR]:-}"
 [[ -z "$ETCD_VERSION" ]] && { echo "ERROR: no etcd pin for K8s $K8S_MINOR — update ETCD_FOR" >&2; exit 1; }
 [[ -z "$COREDNS_VERSION" ]] && { echo "ERROR: no coredns pin for K8s $K8S_MINOR — update COREDNS_FOR" >&2; exit 1; }
-
-if [[ -z "$AUTOSCALER_VERSION" ]]; then
-  AUTOSCALER_VERSION="${AUTOSCALER_FOR[$K8S_MINOR]:-}"
-fi
-[[ -z "$AUTOSCALER_VERSION" ]] && { echo "ERROR: no autoscaler pin for K8s $K8S_MINOR — set AUTOSCALER_VERSION env or update AUTOSCALER_FOR" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
 # OS detection + cross-distro package wrappers
@@ -409,22 +391,23 @@ PULL_ADDONS=(
   "registry.k8s.io/metrics-server/metrics-server:${METRICS_SERVER_VERSION}"
 )
 
-# Cluster autoscaler — hypervisor-flavored image (built via cluster-autoscaler repo).
-# CA Deployment runs as workload pod; pre-pulling speeds first-boot bootstrap.
-PULL_AUTOSCALER=(
-  "${AUTOSCALER_REGISTRY}/${AUTOSCALER_IMAGE_NAME}:${AUTOSCALER_VERSION}"
+# Hypervisor.io CCM (built externally; pushed to your registry).
+# CCM runs on every cluster, so baking it in saves first-boot pull time.
+PULL_CCM=(
+  "${CCM_REGISTRY}/${CCM_IMAGE_NAME}:${CCM_VERSION}"
 )
 
-# Hypervisor.io CCM (built externally; pushed to your registry)
-PULL_CCM=(
-  "${CCM_REGISTRY}/cloud-controller-manager:${CCM_VERSION}"
-)
+# Cluster autoscaler is NOT baked. Image varies per K8s minor and is
+# only deployed when worker autoscaling is enabled on a cluster. The
+# panel records the image string in kubernetes_supported_versions.
+# cluster_autoscaler_image; kubelet pulls on demand when the autoscaler
+# manifest is applied.
 
 PULL_LIST=()
 case "$ROLE" in
   cp)        PULL_LIST=("${PULL_CP[@]}" "${PULL_WORKER[@]}" "${PULL_CNI[@]}" "${PULL_ADDONS[@]}" "${PULL_CCM[@]}");;
-  worker)    PULL_LIST=("${PULL_WORKER[@]}" "${PULL_CNI[@]}" "${PULL_AUTOSCALER[@]}");;
-  combined)  PULL_LIST=("${PULL_CP[@]}" "${PULL_WORKER[@]}" "${PULL_CNI[@]}" "${PULL_ADDONS[@]}" "${PULL_AUTOSCALER[@]}" "${PULL_CCM[@]}");;
+  worker)    PULL_LIST=("${PULL_WORKER[@]}" "${PULL_CNI[@]}");;
+  combined)  PULL_LIST=("${PULL_CP[@]}" "${PULL_WORKER[@]}" "${PULL_CNI[@]}" "${PULL_ADDONS[@]}" "${PULL_CCM[@]}");;
 esac
 
 for img in "${PULL_LIST[@]}"; do
@@ -491,7 +474,7 @@ k8s_minor=$K8S_MINOR
 role=$ROLE
 cni=$CNI
 ccm_version=$CCM_VERSION
-autoscaler_image=$AUTOSCALER_REGISTRY/$AUTOSCALER_IMAGE_NAME:$AUTOSCALER_VERSION
+ccm_image=$CCM_REGISTRY/$CCM_IMAGE_NAME:$CCM_VERSION
 etcd_version=$ETCD_VERSION
 coredns_version=$COREDNS_VERSION
 baked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
