@@ -221,19 +221,14 @@ if ! command -v yq >/dev/null 2>&1; then
 fi
 
 # Helm — used by control-plane-init.sh to install Cilium.
-# Use the official get-helm-3 installer script (distro-neutral) instead of per-family repos.
+# Use the official get-helm-4 installer (distro-neutral). Avoids relying on
+# baltocdn.com (Helm's apt repo CDN), which intermittently fails to resolve
+# from build VMs.
 if ! command -v helm >/dev/null 2>&1; then
-  if [ "$OS_FAMILY" = "debian" ]; then
-    mkdir -p /etc/apt/keyrings
-    curl -fsSL https://baltocdn.com/helm/signing.asc | gpg --dearmor -o /etc/apt/keyrings/helm.gpg
-    echo "deb [signed-by=/etc/apt/keyrings/helm.gpg] https://baltocdn.com/helm/stable/debian/ all main" \
-      > /etc/apt/sources.list.d/helm-stable-debian.list
-    pkg_update
-    pkg_install helm
-  else
-    # RHEL family: install from upstream tarball (Baltimore CDN apt repo is Debian-only).
-    curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-  fi
+  curl -fsSL -o /tmp/get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4
+  chmod 700 /tmp/get_helm.sh
+  /tmp/get_helm.sh
+  rm -f /tmp/get_helm.sh
 fi
 
 # ---------------------------------------------------------------------------
