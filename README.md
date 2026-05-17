@@ -142,6 +142,27 @@ After script completes, shut VM down (`shutdown -h now`), snapshot the disk, reg
 
 See `scripts/bake.sh` for the full script.
 
+### Registry mirror (for hosts that can't reach `registry.k8s.io`)
+
+`registry.k8s.io` is GCS-fronted and geo-routed; bake VMs outside the US sometimes hit packet loss to its frontends. Each image pull is wrapped in `timeout 90s` and retried up to 3 times with exponential backoff (5s, 15s, 45s). If retries fail and `REGISTRY_MIRROR` is set, the script falls back to the mirror and **retags** the result to the canonical `registry.k8s.io/...` name (so kubeadm's image references resolve locally without further config).
+
+Known working mirrors:
+
+| Region | Mirror |
+|---|---|
+| CN / SEA | `registry.aliyuncs.com/google_containers` |
+| CN | `registry.cn-hangzhou.aliyuncs.com/google_containers` |
+| CN | `k8s.m.daocloud.io` |
+
+Usage:
+
+```bash
+REGISTRY_MIRROR=registry.aliyuncs.com/google_containers \
+  ./scripts/bake.sh --version 1.36.1 --role combined
+```
+
+If all retries + mirror fallback fail, the bake exits non-zero and refuses to continue — a partially-pulled image would silently break first-boot bootstrap on cluster nodes (defeating the offline-safe deploy contract). Fix connectivity, set a mirror, or rebake from a different region.
+
 ---
 
 ## Per-version pinning matrix

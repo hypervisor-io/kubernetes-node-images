@@ -63,6 +63,56 @@ done
 [[ ! "$ROLE" =~ ^(cp|worker|combined)$ ]] && { echo "ERROR: --role must be cp|worker|combined" >&2; exit 1; }
 [[ ! "$CNI" =~ ^(cilium|calico|flannel)$ ]] && { echo "ERROR: --cni must be cilium|calico|flannel" >&2; exit 1; }
 
+# Accept either X.Y or X.Y.Z. If user gave just X.Y, fetch available
+# patches for that minor from the GitHub releases API and let them pick.
+# Apt needs the full X.Y.Z to resolve the kubeadm/kubelet/kubectl pkgs.
+if [[ "$K8S_VERSION" =~ ^[0-9]+\.[0-9]+$ ]]; then
+  echo "==> '$K8S_VERSION' is a minor version. Fetching available patches..."
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "ERROR: curl required to list patch versions for minor '$K8S_VERSION'" >&2
+    exit 1
+  fi
+  # jq isn't installed yet at this point in the script. Use grep+sed.
+  _patches=$(curl -fsSL \
+      "https://api.github.com/repos/kubernetes/kubernetes/releases?per_page=100" \
+      2>/dev/null \
+    | grep '"tag_name":' \
+    | sed -E 's/.*"tag_name": *"v([^"]+)".*/\1/' \
+    | grep -E "^${K8S_VERSION//./\\.}\\.[0-9]+$" \
+    | sort -V -r)
+  if [[ -z "$_patches" ]]; then
+    echo "ERROR: no stable patch releases found for K8s minor '$K8S_VERSION'." >&2
+    echo "       Check https://github.com/kubernetes/kubernetes/releases or pass an explicit X.Y.Z." >&2
+    exit 1
+  fi
+  if [[ ! -t 0 ]]; then
+    # Non-interactive: auto-pick latest patch.
+    K8S_VERSION="$(echo "$_patches" | head -n1)"
+    echo "==> non-interactive: auto-selected latest patch $K8S_VERSION"
+  else
+    echo "Available patches for ${K8S_VERSION}:"
+    _i=0
+    _arr=()
+    while IFS= read -r p; do
+      _i=$((_i+1))
+      _arr+=("$p")
+      echo "  $_i) $p"
+    done <<< "$_patches"
+    echo -n "Select patch [1-$_i, default 1]: "
+    read _pick
+    _pick="${_pick:-1}"
+    if [[ ! "$_pick" =~ ^[0-9]+$ ]] || (( _pick < 1 || _pick > _i )); then
+      echo "ERROR: invalid selection '$_pick'" >&2
+      exit 1
+    fi
+    K8S_VERSION="${_arr[$((_pick-1))]}"
+    echo "==> selected $K8S_VERSION"
+  fi
+fi
+
+# Final check: must be full X.Y.Z (interactive prompt above guarantees this).
+[[ ! "$K8S_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && { echo "ERROR: --version must be X.Y or X.Y.Z (e.g. 1.34.2), got '$K8S_VERSION'" >&2; exit 1; }
+
 K8S_MINOR="$(echo "$K8S_VERSION" | awk -F. '{print $1"."$2}')"   # e.g. 1.34.2 -> 1.34
 
 # ---------------------------------------------------------------------------
@@ -421,12 +471,89 @@ case "$ROLE" in
   combined)  PULL_LIST=("${PULL_CP[@]}" "${PULL_WORKER[@]}" "${PULL_CNI[@]}" "${PULL_ADDONS[@]}" "${PULL_CCM[@]}");;
 esac
 
+# Image-pull strategy:
+#  - 3 attempts per image with exponential backoff (5s, 15s, 45s).
+#  - Each attempt wrapped in `timeout 90s` so a stuck TCP connection
+#    doesn't burn the whole bake (default ctr pull has no timeout).
+#  - If REGISTRY_MIRROR is set and the canonical pull fails all 3 attempts,
+#    fall back to the mirror and retag to the canonical name so kubeadm
+#    sees the upstream reference. Common mirrors:
+#       REGISTRY_MIRROR=registry.aliyuncs.com/google_containers   (CN/SEA)
+#       REGISTRY_MIRROR=registry.cn-hangzhou.aliyuncs.com/google_containers
+#       REGISTRY_MIRROR=k8s.m.daocloud.io                         (CN)
+#    Mirror only substitutes the `registry.k8s.io/` prefix; quay.io and
+#    docker.io images bypass the mirror (mirrors only carry k8s.io).
+#  - Any image that fails all attempts (including mirror fallback) causes
+#    the bake to exit non-zero. Silent skip breaks the offline-safe deploy
+#    contract — cluster nodes must NOT need to pull at first boot.
+REGISTRY_MIRROR="${REGISTRY_MIRROR:-}"
+FAILED_PULLS=()
+
+pull_with_retry() {
+  local img="$1"
+  local attempt
+  for attempt in 1 2 3; do
+    if timeout 90s ctr -n=k8s.io images pull "$img"; then
+      return 0
+    fi
+    if [[ $attempt -lt 3 ]]; then
+      local sleep_for=$(( 5 * (3 ** (attempt - 1)) ))   # 5, 15, 45
+      echo "    attempt $attempt failed for $img — retrying in ${sleep_for}s" >&2
+      sleep "$sleep_for"
+    fi
+  done
+  return 1
+}
+
+pull_via_mirror() {
+  local img="$1"
+  [[ -z "$REGISTRY_MIRROR" ]] && return 1
+  # Only registry.k8s.io images have meaningful upstream mirrors.
+  [[ "$img" != registry.k8s.io/* ]] && return 1
+  local path="${img#registry.k8s.io/}"
+  # Try both layouts:
+  #   - flattened basename (aliyuncs convention: coredns/coredns -> coredns)
+  #   - literal sub-path (some mirrors mirror the full structure)
+  local candidates=( "${REGISTRY_MIRROR}/$(basename "$path")" "${REGISTRY_MIRROR}/${path}" )
+  local m
+  for m in "${candidates[@]}"; do
+    echo "    trying mirror $m" >&2
+    if timeout 90s ctr -n=k8s.io images pull "$m"; then
+      ctr -n=k8s.io images tag --force "$m" "$img"
+      ctr -n=k8s.io images rm "$m" 2>/dev/null || true
+      return 0
+    fi
+  done
+  return 1
+}
+
 for img in "${PULL_LIST[@]}"; do
   echo "    pulling $img"
-  ctr -n=k8s.io images pull "$img" || {
-    echo "    WARN: failed to pull $img — skipping (verify connectivity / registry credentials)" >&2
-  }
+  if pull_with_retry "$img"; then
+    continue
+  fi
+  if pull_via_mirror "$img"; then
+    echo "    pulled $img via mirror $REGISTRY_MIRROR" >&2
+    continue
+  fi
+  echo "    ERROR: failed to pull $img after 3 attempts${REGISTRY_MIRROR:+ + mirror fallback}" >&2
+  FAILED_PULLS+=( "$img" )
 done
+
+if [[ ${#FAILED_PULLS[@]} -gt 0 ]]; then
+  echo "" >&2
+  echo "==> FATAL: ${#FAILED_PULLS[@]} image(s) could not be pulled:" >&2
+  printf '       - %s\n' "${FAILED_PULLS[@]}" >&2
+  echo "" >&2
+  echo "Fix one of:" >&2
+  echo "  1. Verify the bake VM can reach registry.k8s.io (try: curl -v https://registry.k8s.io/v2/)" >&2
+  echo "  2. Set REGISTRY_MIRROR to a working mirror, e.g.:" >&2
+  echo "       REGISTRY_MIRROR=registry.aliyuncs.com/google_containers $0 $*" >&2
+  echo "  3. Rerun bake from a region with reliable registry.k8s.io connectivity." >&2
+  echo "" >&2
+  echo "Refusing to snapshot a broken image (cluster nodes would fail to bootstrap)." >&2
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # 5b. kubernetes-agent binary — Go bootstrap orchestrator
