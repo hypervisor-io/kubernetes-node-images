@@ -33,6 +33,22 @@ CCM_REGISTRY="${CCM_REGISTRY:-ghcr.io/hypervisor-io}"        # override via env
 CCM_IMAGE_NAME="${CCM_IMAGE_NAME:-cloud-controller-manager}" # override via env (for forks)
 CCM_VERSION="${CCM_VERSION:-latest}"
 
+# kubernetes-agent — Go bootstrap binary. Baked into the golden image so
+# cluster nodes don't pull at first boot. Override per-fork via env.
+#
+# Default fetches the 'latest' release from the public hypervisor-io repo:
+#   https://github.com/hypervisor-io/kubernetes-agent/releases/latest/download/kubernetes-agent-linux-amd64
+# To pin a specific version: KUBERNETES_AGENT_VERSION=v1.0.0 (URL auto-derived)
+# To use a fork:              KUBERNETES_AGENT_URL=https://github.com/<org>/<repo>/releases/...
+KUBERNETES_AGENT_VERSION="${KUBERNETES_AGENT_VERSION:-latest}"
+if [[ "$KUBERNETES_AGENT_VERSION" == "latest" ]]; then
+  _KA_PATH="releases/latest/download"
+else
+  _KA_PATH="releases/download/${KUBERNETES_AGENT_VERSION}"
+fi
+KUBERNETES_AGENT_URL="${KUBERNETES_AGENT_URL:-https://github.com/hypervisor-io/kubernetes-agent/${_KA_PATH}/kubernetes-agent-linux-amd64}"
+KUBERNETES_AGENT_SHA256_URL="${KUBERNETES_AGENT_SHA256_URL:-${KUBERNETES_AGENT_URL}.sha256}"
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version)  K8S_VERSION="$2"; shift 2;;
@@ -418,6 +434,36 @@ for img in "${PULL_LIST[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
+# 5b. kubernetes-agent binary — Go bootstrap orchestrator
+# ---------------------------------------------------------------------------
+# Cluster bootstrap (CP-init / CP-join / Worker-join) is driven by this
+# binary. systemD unit cluster-bootstrap.service execs it on first boot.
+# Baking eliminates the first-boot download (faster + works offline).
+
+echo "==> [5b/8] downloading kubernetes-agent ($KUBERNETES_AGENT_VERSION)"
+echo "    src: $KUBERNETES_AGENT_URL"
+mkdir -p /usr/local/bin
+curl -fSL "$KUBERNETES_AGENT_URL" -o /usr/local/bin/kubernetes-agent
+# Verify SHA256 if the publisher ships a sidecar checksum file.
+if curl -fsSL "$KUBERNETES_AGENT_SHA256_URL" -o /tmp/kubernetes-agent.sha256 2>/dev/null; then
+  expected="$(awk '{print $1}' /tmp/kubernetes-agent.sha256)"
+  actual="$(sha256sum /usr/local/bin/kubernetes-agent | awk '{print $1}')"
+  if [[ "$expected" != "$actual" ]]; then
+    echo "FATAL: kubernetes-agent sha256 mismatch (expected=$expected actual=$actual)" >&2
+    rm -f /usr/local/bin/kubernetes-agent
+    exit 1
+  fi
+  echo "    sha256 verified: $actual"
+  rm -f /tmp/kubernetes-agent.sha256
+else
+  echo "    WARN: no sidecar .sha256 — skipping checksum verification" >&2
+fi
+chmod 0755 /usr/local/bin/kubernetes-agent
+# Smoke test: prints version + exits 0. If this fails, the binary is
+# corrupt / arch-mismatched and shouldn't be baked.
+/usr/local/bin/kubernetes-agent version
+
+# ---------------------------------------------------------------------------
 # 6. Hypervisor.io CCM marker dir
 # ---------------------------------------------------------------------------
 # CCM runs as a Pod (Deployment / static manifest) using the image pulled in
@@ -475,6 +521,8 @@ role=$ROLE
 cni=$CNI
 ccm_version=$CCM_VERSION
 ccm_image=$CCM_REGISTRY/$CCM_IMAGE_NAME:$CCM_VERSION
+kubernetes_agent_version=$KUBERNETES_AGENT_VERSION
+kubernetes_agent_url=$KUBERNETES_AGENT_URL
 etcd_version=$ETCD_VERSION
 coredns_version=$COREDNS_VERSION
 baked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
