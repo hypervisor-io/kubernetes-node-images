@@ -12,7 +12,7 @@ Hypervisor Kubernetes Service (HKS) nodes (control-plane + workers) boot from pr
 
 All ship the same upstream `kubeadm` packages from `pkgs.k8s.io`; pick whichever your fleet already uses. The build script auto-detects family via `/etc/os-release` and branches on `apt` vs `dnf`.
 
-**One image per K8s minor version.** Currently supported: `1.34`, `1.35`, `1.36`. Patch version (`.0`, `.1`, `.2`...) baked at build time; declare in `KubernetesSupportedVersion` admin row.
+**One image per K8s minor version.** Currently supported: `1.34`, `1.35`, `1.36`, `1.37`. Patch version (`.0`, `.1`, `.2`...) baked at build time; declare in `KubernetesSupportedVersion` admin row.
 
 ---
 

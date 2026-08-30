@@ -15,7 +15,7 @@
 # Examples:
 #   ./bake.sh --version 1.34.2 --role worker --cni cilium
 #   ./bake.sh --version 1.35.0 --role cp     --cni cilium
-#   ./bake.sh --version 1.36.0 --role combined
+#   ./bake.sh --version 1.37.0 --role combined
 #
 # Requires: root, internet (for package install + image pull), ~6 GB free disk.
 #
@@ -120,9 +120,9 @@ K8S_MINOR="$(echo "$K8S_VERSION" | awk -F. '{print $1"."$2}')"   # e.g. 1.34.2 -
 # ---------------------------------------------------------------------------
 
 # These three are CNI-independent. Verify with: kubeadm config images list --kubernetes-version vX.Y.Z
-declare -A ETCD_FOR; ETCD_FOR[1.34]="3.5.15-0"; ETCD_FOR[1.35]="3.6.6-0"; ETCD_FOR[1.36]="3.6.6-0"
-declare -A COREDNS_FOR; COREDNS_FOR[1.34]="v1.11.3"; COREDNS_FOR[1.35]="v1.13.1"; COREDNS_FOR[1.36]="v1.13.1"
-declare -A PAUSE_FOR; PAUSE_FOR[1.34]="3.10"; PAUSE_FOR[1.35]="3.10.1"; PAUSE_FOR[1.36]="3.10.1"
+declare -A ETCD_FOR; ETCD_FOR[1.34]="3.5.15-0"; ETCD_FOR[1.35]="3.6.6-0"; ETCD_FOR[1.36]="3.6.6-0"; ETCD_FOR[1.37]="3.7.0-0"
+declare -A COREDNS_FOR; COREDNS_FOR[1.34]="v1.11.3"; COREDNS_FOR[1.35]="v1.13.1"; COREDNS_FOR[1.36]="v1.13.1"; COREDNS_FOR[1.37]="v1.14.6"
+declare -A PAUSE_FOR; PAUSE_FOR[1.34]="3.10"; PAUSE_FOR[1.35]="3.10.1"; PAUSE_FOR[1.36]="3.10.1"; PAUSE_FOR[1.37]="3.10.2"
 PAUSE_VERSION="${PAUSE_FOR[$K8S_MINOR]:-3.10}"
 
 # CNI-side
